@@ -10,6 +10,7 @@ var scout = {
 
 			domainRoot: '/',
 			socketio_path: 'socket.io/',
+			socketio_path2: '/socket.io/',
 			socketio_js: 'socket.io.js'
 		},
 		sgv: {
@@ -2379,7 +2380,7 @@ scout.init = {
 	silentWebsocket: function() {
 		var scr = document.createElement('script');
 		scr.type = 'text/javascript';
-		scr.src = scout.config.urls.domainRoot + scout.config.urls.socketio_path + scout.config.urls.socketio_js;
+		scr.src = scout.config.urls.domainRoot + scout.config.urls.socketio_path2 + scout.config.urls.socketio_js;
 		scr.onload = scout.ws.silentInit;
 		document.body.appendChild(scr);
 	}
