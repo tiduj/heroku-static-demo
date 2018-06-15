@@ -1731,7 +1731,7 @@ scout.current = {
 		var delta = scout.util.fmtDelta(cur['delta']);
 		var arrow = scout.util.directionToThickArrow(cur['direction']);
 		var noise = scout.util.noise(cur['noise']);
-		if (noise.length > 1) arrow = noise.substring(0, 1);
+//		if (noise.length > 1) arrow = noise.substring(0, 1);
 		var canvas = document.getElementById("favicon_canvas");
 		
 		var bs = canvas.width;
