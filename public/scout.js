@@ -8,9 +8,8 @@ var scout = {
 			status: 'status.json',
 			treatments: 'treatments.json',
 
-			domainRoot: '/',
-			socketio_path: 'socket.io/',
-			socketio_path2: '/socket.io/',
+			domainRoot: '',
+			socketio_path: '/socket.io/',
 			socketio_js: 'socket.io.js'
 		},
 		sgv: {
@@ -1221,8 +1220,6 @@ scout.sgv = {
 					mbgObj: obj
 				});
 				console.info('added graph MBG', obj, hrs);
-			} else {
-				console.info('ignored graph MBG', obj, hrs);
 			}
 		}
 		console.log("mbgCallback", data);
@@ -1593,8 +1590,6 @@ scout.current = {
 		if (!cur) return;
 		var new_data = (scout.current.currentEntry == null || scout.current.currentEntry['date'] != cur['date']);
 		if (new_data) console.log("loadSgv new data @", new Date());
-		scout.current.currentEntry = cur;
-		scout.current.lastAttemptTime = new Date();
 
 		var sgvText = cur['sgv'];
 		var direction = scout.util.directionToArrow(cur['direction']);
@@ -1603,6 +1598,22 @@ scout.current = {
 
 		var curSgv = document.querySelector("#current_sgv");
 		var curMins = document.querySelector("#current_minsago");
+
+		var is_current = scout.current.shouldUpdateCurrent(cur);
+		if (!is_current) {
+			console.info("loadSgv not current");
+			return;
+		}
+
+		var is_gap = scout.current.isGapCurrent(cur);
+		var oldAttemptTime;
+		if (is_gap) {
+			 oldAttemptTime = scout.current.lastAttemptTime;
+			 console.info("isGap oldAttemptTime=", oldAttemptTime);
+		}
+
+		scout.current.currentEntry = cur;
+		scout.current.lastAttemptTime = new Date();
 
 		curSgv.classList.remove('old-data');
 		curMins.classList.remove('old-data');
@@ -1641,6 +1652,55 @@ scout.current = {
 		}
 		scout.current.updateFavicon(cur, new_data);
 		scout.current.notify(cur);
+
+
+		if (is_gap) {
+			console.info("isGap running manual fetch from", oldAttemptTime);
+			scout.current.manualFetch(oldAttemptTime);
+		}
+	},
+
+	/*
+	 * Get the number of minutes between entry and the currentEntry,
+	 * assuming entry is newer than currentEntry
+	 */ 
+	getCurrentMinDiff: function(entry) {
+		if (!scout.current.currentEntry) {
+			return null;
+		}
+		return parseInt(entry.date - scout.current.currentEntry.date) / (60 * 1000);
+	},
+
+	/*
+	 * Whether currentEntry should be updated with entry
+	 * returns true if entry is the newest and false if backfill data
+	 */
+	shouldUpdateCurrent: function(entry) {
+		if (!scout.current.currentEntry) {
+			return true;
+		}
+
+		var mins_diff = scout.current.getCurrentMinDiff(entry);
+		if (mins_diff <= -1) {
+			console.info("updateCur new backfill entry with diff=" + mins_diff);
+			return false;
+		}
+
+		return true;
+	},
+
+	/*
+	 * Whether there is a gap between the most recent point and the last
+	 * stored point.
+	 */
+	isGapCurrent: function(entry) {
+		if (!scout.current.currentEntry) {
+			return false;
+		}
+
+		var mins_diff = scout.current.getCurrentMinDiff(entry);
+		console.debug("isGapCurrent diff=", mins_diff);
+		return (mins_diff > 5);
 	},
 
 	/*
@@ -1678,6 +1738,7 @@ scout.current = {
 		var n = function(i) {
 			return (i/64) * bs;
 		};
+		var baseFont = "Open Sans";
 
 		with (canvas.getContext("2d")) {
 			clearRect(0, 0, canvas.width, canvas.height);
@@ -1690,10 +1751,10 @@ scout.current = {
 				fillStyle = "rgb(0,0,0)";
 				textAlign = "center";
 
-				font = n(30)+"px Arial";
+				font = n(30)+"px "+baseFont;
 				fillText(tdiff, n(32), n(30));
 
-				font = n(40)+"px Arial";
+				font = n(40)+"px "+baseFont;
 				fillText(tline, n(32), n(63));
 			} else if (scout.util.isMissedData(cur['date'])) {
 				var tdiff = scout.util.getShortTimeDiff(cur['date']);
@@ -1704,10 +1765,10 @@ scout.current = {
 				fillStyle = "rgb(0,0,0)";
 				textAlign = "center";
 
-				font = n(30)+"px Arial";
+				font = n(30)+"px "+baseFont;
 				fillText(tdiff, n(32), n(30));
 
-				font = n(40)+"px Arial";
+				font = n(40)+"px "+baseFont;
 				fillText(sgv, n(32), n(63));
 			} else {
 				fillStyle = scout.util.bgColorForSgv(sgv);
@@ -1717,18 +1778,18 @@ scout.current = {
 				textAlign = "center";
 
 				if (show_delta) {
-					font = n(30)+"px Arial";
+					font = n(30)+"px "+baseFont;
 					if (delta.length > 4 && delta.indexOf(".") != -1) {
 						delta = delta.split(".")[0];
 					}
 					fillText(delta, n(32), n(30));
 					textAlign = "center";
 				} else {
-					font = "bold "+n(40)+"px Arial";
+					font = "bold "+n(40)+"px "+baseFont;
 					fillText(arrow, n(32), n(30));
 				}
 
-				font = n(40)+"px Arial";
+				font = n(40)+"px "+baseFont;
 				fillText(sgv, n(32), n(63));
 			}
 		}
@@ -1746,6 +1807,26 @@ scout.current = {
 			cur['sgv'] >= scout.config.sgv.target_max ||
 			Math.abs(cur['delta']) >= scout.config.sgv.spike_delta
 		) && (cur["_id"] != scout.current.nflast["_id"]);
+	},
+
+	shouldNotifyText: function(cur) {
+		var ret = [];
+		if (cur['noise'] > 1) {
+			ret.push("NOISE: " + scout.util.noise(cur['noise']));
+		}
+		if (cur['sgv'] < scout.config.sgv.target_min) {
+			ret.push("LOW ALERT");
+		}
+		if (cur['sgv'] > scout.config.sgv.target_max) {
+			ret.push("HIGH ALERT");
+		}
+		if (cur['delta'] >= scout.config.sgv.spike_delta) {
+			ret.push("HIGH SPIKE");
+		}
+		if (-1*cur['delta'] >= scout.config.sgv.spike_delta) {
+			ret.push("LOW SPIKE");
+		}
+		return ret.join("\n");
 	},
 
 	nfobj: null,
@@ -1769,8 +1850,8 @@ scout.current = {
 				var delta = cur['delta'] > 0 ? '+'+scout.util.round(cur['delta'], 1) : scout.util.round(cur['delta'], 1);
 				var noise = scout.util.noise(cur['noise']);
 
-				var text = "BG level is "+cur['sgv']+""+direction;
-				var body = "Delta: "+delta+" "+noise;
+				var text = "BG level is "+cur['sgv']+""+direction+" "+delta;
+				var body = scout.current.shouldNotifyText(cur);
 				var bgIcon = scout.current.buildBgIcon(cur);
 				var options = {
 					body: body,
@@ -1863,10 +1944,9 @@ scout.current = {
 	},
 
 	/*
-	 * Performs a manual fetch by determining when the last data was received,
-	 * and fetching for data after that point.
+	 * Determines when the last data was received of any type.
 	 */
-	manualFetch: function() {
+	getMinLatest: function() {
 		// TODO: separate out in calls for scout.fetch?
 		scout.current.lastAttemptTime = new Date();
 		var latest = [];
@@ -1880,6 +1960,13 @@ scout.current = {
 		var minLatest = Math.min.apply(null, latest);
 
 		console.debug("latest", latest, minLatest);
+		return minLatest;
+	},
+
+	/*
+	 * Performs a manual fetch after the given point.
+	 */
+	manualFetch: function(minLatest) {
 		scout.fetch.gte(moment(minLatest).format(), function(d) {
 			console.log("manualFetch:", d);
 		});
@@ -1890,7 +1977,7 @@ scout.current = {
 	 */
 	checkManualFetch: function() {
 		if (scout.current.needManualFetch()) {
-			scout.current.manualFetch();
+			scout.current.manualFetch(scout.current.getMinLatest());
 		} else {
 			// update favicon for old data
 			console.debug("manualFetch favicon update");
@@ -2380,7 +2467,7 @@ scout.init = {
 	silentWebsocket: function() {
 		var scr = document.createElement('script');
 		scr.type = 'text/javascript';
-		scr.src = scout.config.urls.domainRoot + scout.config.urls.socketio_path2 + scout.config.urls.socketio_js;
+		scr.src = scout.config.urls.domainRoot + scout.config.urls.socketio_path + scout.config.urls.socketio_js;
 		scr.onload = scout.ws.silentInit;
 		document.body.appendChild(scr);
 	}
