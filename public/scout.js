@@ -8,8 +8,8 @@ var scout = {
 			status: 'status.json',
 			treatments: 'treatments.json',
 
-			domainRoot: '',
-			socketio_path: '/socket.io/',
+			domainRoot: '/',
+			socketio_path: 'socket.io/',
 			socketio_js: 'socket.io.js'
 		},
 		sgv: {
