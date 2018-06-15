@@ -9,7 +9,7 @@ var scout = {
 			treatments: 'treatments.json',
 
 			domainRoot: '',
-			socketio_path: 'socket.io/',
+			socketio_path: '/socket.io/',
 			socketio_js: 'socket.io.js'
 		},
 		sgv: {
