@@ -1640,9 +1640,9 @@ scout.current = {
 		scout.util.updateTimeago();
 		document.querySelector("#current_direction").innerHTML = direction;
 		document.querySelector("#current_delta").innerHTML = delta;
-		if (noise.length > 2) {
-			noise += "<br />";
-		}
+//		if (noise.length > 2) {
+//			noise += "<br />";
+//		}
 		document.querySelector("#current_noise").innerHTML = noise;
 
 		var title = cur['sgv']+''+direction+' '+delta+' '+noise+' - scout';
