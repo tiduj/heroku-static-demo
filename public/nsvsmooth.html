@@ -1,0 +1,466 @@
+<head>
+	<script src="http://ajax.googleapis.com/ajax/libs/jquery/1.8.2/jquery.min.js"></script>
+	<script src="http://code.highcharts.com/highcharts.js"></script>
+
+	
+</head>
+<body>
+
+
+<form>
+Website (ex: sitename.azurewebsites.net):<br>
+<input type="text" name="url" size="50" id="url">
+<br>
+Number of Data Points:<br>
+<input type="text" name="numpoints" value="1000" id="numpoints">
+</form>
+
+Prediction Look Ahead Time:<br>
+<input type="range" min="5" max="60" value="30" step="5" onchange="showValue(this.value)" id="slider" />
+<span id="range"> 30 min</span>
+
+<br>
+<br>
+
+<button onclick="execute()">Calculate</button>
+
+<div id="container" style="width:100%; height:400px;"></div>
+
+  <script type="text/javascript">
+function showValue(newValue)
+{
+	document.getElementById("range").innerHTML=newValue+" min";
+}
+	var lookback=2
+	var BG_REF = 140.0; //Central tendency
+	var BG_MIN = 36; //Not 39, but why?
+	var BG_MAX = 400;
+	var WARN_THRESHOLD = 0.05;
+	var URGENT_THRESHOLD = 0.10;
+	var AR_CONE = [-0.723, 1.716];
+
+	var ONE_HOUR = 3600000;
+	var ONE_MINUTE = 60000.0;
+	var FIVE_MINUTES = 300000;
+	var TEN_MINUTES =  600000;
+	var origdata=[];
+	var ar2result=[];
+	var lp=[];
+	var lp2d=[];
+	var wlp=[];
+	var loss=[];
+	var veloc=[];
+	var veloc2d=[];
+	var velocw=[];
+	var data=[];
+	document.getElementById("url").value="foo.azurewebsites.net"
+	
+
+	
+	function execute() {
+	var url = document.getElementById("url").value
+	var numpoints=document.getElementById("numpoints").value
+	var endpoint="https://"+url+"/api/v1/entries.json?count="+numpoints
+	var pmin=document.getElementById("slider").value
+
+	$.ajax({
+		type: 'GET',
+		url: endpoint,
+		async: false,
+		dataType: 'json',
+		crossDomain: true,
+		success: function(data)
+		{
+
+			datahandler(data.reverse(),pmin)
+	
+		},
+		error: function(e)
+		{
+		   alert("Website Error "+e.message);
+		}
+	})
+}
+	
+	function datahandler(data,pmin) {
+		var fbg=[]
+		var arnum=Math.round(pmin/5-1)
+		c=0
+		
+		//strip dups, non sgv, errors
+		for (i=1;i<data.length-2;i++) {
+			if (data[i].date == data[i-1].date || data[i].sgv < 40 || data[i].type != "sgv") {
+				data.splice(i, 1)
+			i=i-1}
+			
+		}
+		
+		
+		for (i=1;i<data.length-1;i++) {
+				
+				origdata[i-1]=[(data[i].date),parseInt(data[i].sgv)]
+
+			
+		}
+	//skip first 10 to make sure we have enough data
+		for (i=10;i<data.length-2;i++) {
+			
+			
+//				fbg[i]=forecast([{"y":data[i-1].sgv,"mills":data[i-1].date},{"y":data[i].sgv,"mills":data[i].date}])
+//				ar2result[i-10]=[(fbg[i].predicted[arnum].mills),fbg[i].predicted[arnum].y]
+				
+				//v2d=(data[i].sgv-data[i-1].sgv)/((data[i].date-data[i-1].date)/ONE_MINUTE)
+			//lp2d[i-10]=[data[i].date+pmin*ONE_MINUTE,v2d*pmin+data[i].sgv]
+				//lp[i-10]=[(fbg[i].predicted[arnum].mills),velocity_cf(data,i)*pmin+data[i].sgv]
+			v=velocity_cf(data,i)
+			//vw=velocity_wcf(data,i)
+		//	wlp[i-10]=[data[i].date+pmin*ONE_MINUTE,vw*pmin+data[i].sgv]
+			veloc[i-10]=[data[i].date,v]
+			//veloc2d[i-10]=[data[i].date,v2d]
+			//velocw[i-10]=[data[i].date,vw]
+				lp[i-10]=[data[i].date+pmin*ONE_MINUTE,v*pmin+data[i].sgv]	
+//				loss[i-10]=[data[i].date,fbg[i].avgLoss]	
+			
+			
+			
+		
+		}
+		console.log("test")
+
+		
+	} //end data handler
+
+	// function velocity(data,i) {
+	// 	var v;
+	// 	if (i>2&&((data[i].date-data[i-2].date)/ONE_MINUTE <10.1))
+	// 		{v=(3.0*data[i].sgv-4.0*data[i-1].sgv+data[i-2].sgv)/((data[i].date-data[i-2].date)/ONE_MINUTE)}
+	//
+	//
+	// else
+	//
+	// 		 {
+	//  				//v=(data[i].sgv-data[i-1].sgv)/((data[i].date-data[i-1].date)/ONE_MINUTE)
+	// 			 v=null
+	// 			// console.log(v)
+	//  			}
+	//
+	// 		//hard limit
+	// 		if (v>1.0) {v=1.0+(v-1.0)/3.0} else
+	// 			if (v<-1.0) {v=-1.0+(v+1.0)/3.0}
+	// console.log(i+" "+v+" "+(data[i].sgv-data[i-1].sgv)+" "+(data[i].date-data[i-1].date))
+	// 	return v
+	//
+	// }
+	
+	function velocity_cf(data,i) {
+		//linear fit to 3 data points get slope (ie velocity)
+		var v;
+
+		if ((data[i].date-data[i-3].date)/ONE_MINUTE<15.1) {n=4} else
+			if ((data[i].date-data[i-2].date)/ONE_MINUTE<10.1) {n=3} else
+				if ((data[i].date-data[i-1].date)/ONE_MINUTE<10.1) {n=2} else {n=0}
+		
+		if (i>n+3 && n!=0) {
+			xm=0.0
+			ym=0.0
+			for (j=0;j<n;j++) {
+			
+				xm=xm+data[i-j].date/ONE_MINUTE
+				ym=ym+data[i-j].sgv
+			}
+			xm=xm/n
+			ym=ym/n
+			c1=0.0
+			c2=0.0
+			for (j=0;j<n;j++) {
+				t=data[i-j].date/ONE_MINUTE
+				c1=c1+(t-xm)*(data[i-j].sgv-ym)
+				c2=c2+(t-xm)*(t-xm)
+
+			}
+			v=c1/c2
+		//	console.log(v)
+		}
+		//need to decide what to return if there isnt enough data
+		
+		else {v=0}
+			
+			return v
+	}
+	
+	
+	
+	
+	
+
+	
+	function log10(val) { return Math.log(val) / Math.LN10; }
+	
+	function linearforecast(sgvs)
+	
+	{
+		
+		
+	}
+		
+	function forecast(sgvs) {
+
+	    var result = {
+	      predicted: []
+	      , avgLoss: 0
+	    };
+
+	    var lastIndex = sgvs ? sgvs.length - 1 : 0;
+
+	    if (lastIndex < 1) {
+	      return result;
+	    }
+
+	    var current = sgvs[lastIndex].y;
+	    var prev = sgvs[lastIndex - 1].y;
+
+	    if (current >= BG_MIN && sgvs[lastIndex - 1].y >= BG_MIN) {
+	      // predict using AR model
+	      var lastValidReadingTime = sgvs[lastIndex].mills;
+	      var elapsedMins = (sgvs[lastIndex].mills - sgvs[lastIndex - 1].mills) / ONE_MINUTE;
+	      var y = Math.log(current / BG_REF);
+	      if (elapsedMins < 5.1) {
+	        y = [Math.log(prev / BG_REF), y];
+	      } else {
+	        y = [y, y];
+	      }
+	      //var n = Math.ceil(12 * (1 / 2 + (Date.now() - lastValidReadingTime) / ONE_HOUR));
+		  //assume last data point was returned right now, n=6
+		  var n=10
+	      var AR = [-0.723, 1.716];
+	
+	      var dt = sgvs[lastIndex].mills;
+	      for (var i = 0; i <= n; i++) {
+	        y = [y[1], AR[0] * y[0] + AR[1] * y[1]];
+	        dt = dt + FIVE_MINUTES;
+			//console.log(Math.exp(y[1])*BG_REF)
+	        result.predicted[i] = {
+	          mills: dt,
+	          y: Math.max(BG_MIN, Math.min(BG_MAX, Math.round(BG_REF * Math.exp(y[1]))))
+			//  y: Math.max(BG_MIN, Math.min(BG_MAX, (BG_REF * Math.exp(y[1]))))
+	        };
+			//console.log(Math.max(BG_MIN, Math.min(BG_MAX, Math.round(BG_REF * Math.exp(y[1])))))
+	      }
+
+	      // compute current loss
+	      var size = Math.min(result.predicted.length - 1, 6);
+	      for (var j = 0; j <= size; j++) {
+	        result.avgLoss += 1 / size * Math.pow(log10(result.predicted[j].y / 120), 2);
+	      }
+	    }
+
+	    return result;
+	  };
+	
+	
+
+	
+    function scaleBg(bg) {
+       
+               return bg;
+           
+       }
+	   
+	   
+	   
+	   
+	   
+	   
+//html output	
+	   
+	   
+//html output	
+
+
+
+
+	$(document).ready(function(){
+	    $("button").click(function(){
+	        execute();
+			
+	 	   $(function (){
+			   var d = new Date()
+			   var n = d.getTimezoneOffset();
+	 		   //force timezone
+	 		   Highcharts.setOptions({
+	 		          global: {
+						  timezoneOffset:n
+	 		          }
+	 		      });
+	 	       $('#container').highcharts({
+	 	           chart: {
+	 	               type: 'scatter',
+	 	               zoomType: 'xy'
+	 	           },
+			   
+
+	 	           title: {
+	 	               text: 'Compare BG to Linear Predictor'
+	 	           },
+	 	           subtitle: {
+	 	               text: ''
+	 	           },
+	           
+	 	           xAxis: {
+	 				   type:'datetime',
+	 				   useUTC:false,
+	 	               title: {
+	 	                   enabled: true,
+	 	                   text: 'time'
+	 	                },
+	        	               startOnTick: true,
+	       	               endOnTick: true,
+	        	               showLastLabel: true
+	 					 ,
+	 					 labels: {
+	 					             //    format: '{value}'
+	 					            },
+	 							},
+	 	           yAxis: [
+				   
+	 				   {//primary
+	 					   min: 0, max: 400, tickInterval:80,
+	 	               title: {
+	 	                   text: 'BG mg/dl'
+	 	               }
+	 	           },
+			   
+	 			   {//secondary
+	 				   				min: -4, max: 4,
+	 								gridLineWidth: 0,
+	 			   	               title: {
+	 			   	                   text: 'Velocity (mg/dl/min)'
+	 			   	               },
+							   
+	 							   opposite:true
+
+
+	 			   	           }],
+						   
+						   
+	 	           legend: {
+	 	               layout: 'vertical',
+	 	               align: 'left',
+	 	               verticalAlign: 'top',
+	 	               x: 100,
+	 	               y: 70,
+	 	               floating: true,
+	 	               backgroundColor: (Highcharts.theme && Highcharts.theme.legendBackgroundColor) || '#FFFFFF',
+	 	               borderWidth: 1
+	 	           },
+	 	           plotOptions: {
+					   scatter:{
+				   					                       lineWidth:2,
+				   	 	                   marker: {
+				   	 	                       radius: 2,
+				   	 	                       states: {
+				   	 	                           hover: {
+				   	 	                               enabled: true
+
+				   	 	                           }
+				   	 	                       }
+				   	 	                   },
+				   	 	                   tooltip: {
+				   	 	                       headerFormat: '<b>{series.name}</b><br>',
+				   	 	                       pointFormat: '{point.x:%H %M}, {point.y} '
+											   // pointFormat: '{point.x}, {point.y} '
+				   	 	                   }
+				   					                   },
+					   
+					   line: {
+	 	                   marker: {
+	 	                       radius: 2,
+	 	                       states: {
+	 	                           hover: {
+	 	                               enabled: true,
+	 	                               lineColor: 'rgb(100,100,100)'
+	 	                           }
+	 	                       }
+	 	                   },
+
+	 	                   states: {
+	 	                       hover: {
+	 	                           marker: {
+	 	                               enabled: true
+	 	                           }
+	 	                       }
+	 	                   },
+	 	                   tooltip: {
+	 	                       headerFormat: '<b>{series.name}</b><br>',
+	 	                       pointFormat: '{point.x:%H %M}, {point.y} mg/dl'
+	 	                   }
+	 	               }
+	 	           },
+	 	           series: [{
+	 				   yAxis: 0,
+	 	               name: 'Dexcom BG Data',
+	 	               color: 'rgba(0, 255, 0, .5)',
+	 	               data: origdata
+
+	 	           },
+	 			   // {			   yAxis: 0,
+// 	 			   	               name: 'AR2 Prediction',
+// 	 			   	               color: 'rgba(0, 0, 255, .5)',
+// 					   data: ar2result
+//
+//
+// 	 			   	           },
+				 			   {			   yAxis: 0,
+				 			   	               name: 'Linear Predictor',
+				 			   	               color: 'rgba(0, 0, 0, .5)',
+								   data: lp
+
+
+				 			   	           },
+
+				 			   // {			   yAxis: 0,
+ // 		 			   				 			   	               name: 'LP2d',
+ // 		 			   				 			   	               color: 'rgba(50,50,50, .5)',
+ // 		 			   								  	 			data: lp2d
+ // 		 			   				 			   	           }
+ // 	 						   ,
+	 						   {
+	 						   		yAxis: 1,
+	 						   		name: 'Velocity',
+	 						   		color: 'rgba(0, 0, 0, .15)',
+	 						   		data: veloc
+
+	 						   			   	           }
+													   //,
+							 						   // {
+							 						   // 		yAxis: 2,
+							 						   // 		name: 'AR2 Loss Function',
+							 						   // 		color: 'rgba(255, 0, 0, .15)',
+							 						   // 		data: loss
+							 						   //
+							 						   // 			   	           },
+																			   
+													   // ,
+													   // 							   													   {yAxis: 1,
+													   // 							    						   		name: 'AR2 Loss Function',
+													   // 							    						   		color: 'rgba(255, 255, 0, .5)',
+													   // 							    						   		data: loss
+													   //
+													   // 							    						   			   	           }
+	 					   ]
+	 	       });
+		   
+
+		   
+		  
+	      
+		   
+	 });
+	    });
+	});
+		
+		
+	
+		
+  </script>
+</body>
