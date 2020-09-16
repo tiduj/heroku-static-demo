@@ -1,3 +1,7 @@
+/***********************************************
+* scout: CGM data analysis tool for Nightscout *
+* https://github.com/jwoglom/scout             *
+************************************************/
 var scout = {
 	config: {
 		urls: {
@@ -15,13 +19,15 @@ var scout = {
 		sgv: {
 			target_min: 80,
 			target_max: 200,
-			spike_delta: 12
+			spike_delta: 12,
+			graph_min: 40,
+			graph_max: 240
 		},
 		mbg: {
 			radius: 5
 		},
 		old_minutes: 15,
-		missed_minutes: 8,
+		missed_minutes: 10,
 		pct_split_mins: 15,
 		modifyTitle: false,
 		timeFormat: 'MM/DD/YYYY HH:mm',
@@ -32,7 +38,12 @@ var scout = {
 		uploaderBat_default_readings: 1000,
 		sensor_age_days: 7,
 		fetch_mode: 'websocket',
-		fetch_delta_fallback: true
+		fetch_delta_fallback: true,
+		fix_sgv_direction: true,
+		notify_for_converted_deltas: false,
+		graph_gradient: false,
+		tooltip_device_strip: 'xDrip-DexcomG5',
+		graph_highlight_backfill: true
 	}
 };
 
@@ -49,6 +60,12 @@ scout.util = {
 		return 'rgb(0, 255, 0)';
 	},
 
+	colorForSgvBackfill: function(sgv) {
+		if (sgv < scout.config.sgv.target_min) return 'rgb(255, 0, 200)';
+		if (sgv >= scout.config.sgv.target_max) return 'rgb(255, 127, 127)';
+		return 'rgb(0, 255, 255)';
+	},
+
 	updateInRange: function(obj, sgv) {
 		if (sgv < scout.config.sgv.target_min) obj.inRange[1]++;
 		else if (sgv >= scout.config.sgv.target_max) obj.inRange[3]++;
@@ -63,6 +80,11 @@ scout.util = {
 
 	round: function(num, places) {
 		return parseInt(num * Math.pow(10, places)) / Math.pow(10, places);
+	},
+
+	percent: function(num, decimalPlaces) {
+		var places = parseInt(decimalPlaces) || 0;
+		return new String(scout.util.round(num, 2+places) * 100).substr(0, 3+places)+"%";
 	},
 
 	directionToArrow: function(dir) {
@@ -121,7 +143,9 @@ scout.util = {
 
 	timeAgo: function(date) {
 		var mom = moment(date).fromNow();
-		if (mom == "a few seconds ago") return "just now";
+		if (mom == "a few seconds ago") {
+			return "just now";
+		}
 		return mom;
 	},
 
@@ -135,6 +159,7 @@ scout.util = {
 	},
 
 	noise: function(n) {
+		if (!n) return '';
 		return [
 			'?',
 			'✓',
@@ -208,6 +233,37 @@ scout.util = {
 	updateTimeago: function() {
 		// needs to be re-run after DOM changes
 		timeago().render(document.querySelectorAll('.timeago'));
+	},
+
+	graphGradient: function(type, sgvCtx) {
+		var g = sgvCtx.createLinearGradient(0, 0, 0, 500);
+		var VERY_LOW = 'rgba(255, 0, 0, 1)';
+		var LOW = 'rgba(255, 0, 0, 0.1)';
+		var GOOD = 'rgba(0, 255, 0, 0.3)';
+		var HIGH = 'rgba(255, 127, 0, 0.1)';
+		var VERY_HIGH = 'rgba(255, 127, 0, 0.5)';
+		if (type == 'lowRange') {
+			// rgba(255, 0, 0, 0.1)
+			g.addColorStop(0, VERY_LOW);
+			g.addColorStop(1, LOW);
+		} else if (type == 'goodRange') {
+			// rgba(0, 255, 0, 0.1)
+
+			g.addColorStop(1, LOW);
+			g.addColorStop(0.8, GOOD);
+			g.addColorStop(0.2, GOOD);
+			g.addColorStop(0, HIGH);
+		} else if (type == 'highRange') {
+			// rgba(255, 127, 0, 0.1)
+			g.addColorStop(0.5, HIGH);
+			g.addColorStop(0, VERY_HIGH);
+		}
+
+		return g;
+	},
+
+	isBackfilledSgv: function(sgv) {
+		return sgv['device'].indexOf('Backfill') != -1;
 	}
 };
 
@@ -242,14 +298,14 @@ scout.chartConf = {
 				tooltips: false,
 				datalabels: {
 					display: true,
-					backgroundColor: 'rgba(255, 0, 0, 0.5)',
 					borderRadius: 4,
+					// backgroundColor: 'rgba(255, 0, 0, 0.5),
 					color: 'white',
 					font: {
 						weight: 'bold'
 					},
 					align: 'start',
-					anchor: 'start'
+					anchor: 'start',
 				},
 				data: []
 			}, {
@@ -273,6 +329,14 @@ scout.chartConf = {
 	        	mode: 'nearest',
 	        	intersect: false,
 	        	callbacks: {
+					label: function(tooltipItem, data) {
+						var dataset = data.datasets[tooltipItem.datasetIndex];
+						var idata = dataset.data[tooltipItem.index];
+						if (dataset['label'] == 'Bolus' && !idata['r']) {
+							return ''; // hide Bolus label and value for notes
+						}
+						return Chart.defaults.global.tooltips.callbacks.label(tooltipItem, data);
+					},
 	        		afterLabel: function(tooltipItem, data) {
 	        			var dataset = data.datasets[tooltipItem.datasetIndex];
 		        		var data = dataset.data[tooltipItem.index];
@@ -280,22 +344,45 @@ scout.chartConf = {
 		        			return scout.util.directionToArrow(data.sgvObj['direction']) +
 		                           " "+data.sgvObj['delta']+" mg/dl";
 		        		} else if (data['mbgObj']) {
-		        			return data.mbgObj['device'];
-		        		} else if (data['trObj']) {
+		        			return data.mbgObj['device'] || 'unknown device';
+		        		} else if (data['trObj'] && !!data.trObj['carbs']) {
 		        			return "Carbs: "+data.trObj['carbs'];
 		        		}
 	        			//return parseInt(tooltipItem.yLabel)+" yLabel";
-	        		},
+					},
 	        		footer: function(tooltipItems, data) {
 	        			var tooltipItem = tooltipItems[0]; // fixme, iterate over all
 	        			var dataset = data.datasets[tooltipItem.datasetIndex];
 		        		var data = dataset.data[tooltipItem.index];
 		        		if (data['trObj']) {
-	        				return data.trObj['notes'];
+	        				return data.trObj['notes'].split('\n');
+	        			} else if (data['sgvObj']) {
+	        				return data.sgvObj['device'].replace(scout.config.tooltip_device_strip, '').trim();
 	        			}
 	        		}
 	        	}
-	        },
+			},
+			plugins: {
+				datalabels: {
+					backgroundColor: function(context) {
+						console.log('bgc', context);
+						var index = context.dataIndex;
+						var value = context.dataset.data[index];
+						if (!value['r'] && value['trObj']['notes']) {
+							return 'rgba(255, 128, 0, 0.75)';
+						}
+						return 'rgba(255, 0, 0, 0.5)';
+					},
+
+					formatter: function(value, context) {
+						console.log('fmt', value, context);
+						if (!value['r'] && value['trObj']['notes']) {
+							return 'Note';
+						}
+						return value['r'];
+					}
+				}
+			},
 			scales: {
 				xAxes: [{
 					type: "time",
@@ -322,8 +409,8 @@ scout.chartConf = {
 						labelString: 'mg/dL'
 					},
 					ticks: {
-						suggestedMin: 40,
-						suggestedMax: 280,
+						suggestedMin: scout.config.sgv.graph_min,
+						suggestedMax: scout.config.sgv.graph_max,
 						stepSize: 40
 
 					}
@@ -452,8 +539,8 @@ scout.chartConf = {
 						labelString: 'mg/dL'
 					},
 					ticks: {
-						suggestedMin: 40,
-						suggestedMax: 280,
+						suggestedMin: scout.config.sgv.graph_min,
+						suggestedMax: scout.config.sgv.graph_max,
 						stepSize: 40
 
 					}
@@ -708,6 +795,10 @@ scout.chart = {
 };
 
 scout.tpl = {
+	/*
+	 * render a HTML template
+	 * for all keys in dict, replace {key} in the template with its value
+	 */
 	renderHTML: function(tplId, dict) {
 		var tpl = document.querySelector("script#" + tplId);
 		var html = tpl.innerHTML;
@@ -762,7 +853,6 @@ scout.inRange = {
 	
 	},
 
-
 	submitFormRange: function() {
 		scout.spinner.start('inRange');
 		var date1 = moment(document.querySelector("#in_range_start").value);
@@ -804,6 +894,9 @@ scout.inRange = {
 		scout.spinner.finish('inRange');
 	},
 
+	/*
+	 * Generate the dictionary of templating data
+	 */
 	dataDict: function(data, id, dates) {
 		var dict = {};
 		var chartData = scout.bg.genChartData(data);
@@ -814,15 +907,29 @@ scout.inRange = {
 			dict['header_date'] = moment(dates[0]).format("MMMM Do")+" - "+moment(dates[1]).format("MMMM Do, YYYY");
 		}
 
-		var inRangePct = chartData.inRange[2]/chartData.bgCount
-		var avgBg = chartData.bgSum/chartData.bgCount
+		console.debug('inRange chartData', chartData, data);
+		if (chartData.bgCount == 0) {
+			for (var i=0, j=[
+				'cap_pct', 'realtime_pct', 'realtime_miss', 'in_range_pct', 'out_range_pcts', 'high_low_bg', 'avg_bg', 'avg_a1c'
+			]; i<j.length; i++) dict[j[i]] = 'n/a';
+			return dict;
+		}
 
-		dict['in_range_pct'] = "In range: "+scout.util.round(inRangePct, 4)*100+"%";
-		dict['avg_bg'] = "Average BG: "+Math.round(avgBg);
+		var inRangePct = chartData.inRange[2]/chartData.bgCount;
+		var lowRangePct = chartData.inRange[1]/chartData.bgCount;
+		var highRangePct = chartData.inRange[3]/chartData.bgCount;
+		var avgBg = chartData.bgSum/chartData.bgCount;
+		var totalPct = Math.min(1, chartData.bgCount / chartData.totalPossibleBgs);
+		var realtimePct = (chartData.bgCount - chartData.backfillCount) / chartData.bgCount;
+
+		dict['cap_pct'] = scout.util.percent(totalPct, 2);
+		dict['realtime_pct'] = scout.util.percent(realtimePct, 2);
+		dict['realtime_miss'] = chartData.backfillCount;
+		dict['in_range_pct'] = scout.util.round(inRangePct, 4)*100+"%";
+		dict['out_range_pcts'] = scout.util.percent(lowRangePct)+"/"+scout.util.percent(highRangePct);
+		dict['high_low_bg'] = Math.round(chartData.highBg)+"/"+Math.round(chartData.lowBg);
+		dict['avg_bg'] = ""+Math.round(avgBg);
 		dict['avg_a1c'] = scout.util.round(scout.util.pctA1c(avgBg), 2)+"%A1c";
-		dict['high_bg'] = "High: "+Math.round(chartData.highBg);
-		dict['low_bg'] = "Low: "+Math.round(chartData.lowBg);
-		dict['total_num'] = "Total entries: "+chartData.bgCount;
 
 		return dict;
 	}
@@ -873,6 +980,9 @@ scout.hourlyPct = {
 		scout.spinner.finish('hourlyPct');
 	},
 
+	/*
+	 * Generate the dictionary of templating data
+	 */
 	dataDict: function(data, id, dates) {
 		var dict = {};
 		var chartData = scout.bg.genChartData(data);
@@ -895,6 +1005,9 @@ scout.hourlyPct = {
 	}
 };
 
+/*
+ * Chart for percentiles
+ */
 scout.pct = {
 	init: function(canvasId) {
 		var pctCtx = document.getElementById(canvasId).getContext("2d");
@@ -903,6 +1016,9 @@ scout.pct = {
 		return new Chart(pctCtx, pctConf);
 	},
 
+	/*
+	 * Generate the data piped to chartjs in render()
+	 */
 	genChartData: function(fullData) {
 		// TODO: redo these calculations; there's something fishy
 		// with the data that gets put on the graph, it looks off.
@@ -984,6 +1100,9 @@ scout.pct = {
 
 	},
 
+	/*
+	 * Render a percentile chart given chartData to the element chart
+	 */
 	render: function(chart, chartData) {
 		console.debug("pct chartData", chartData);
 		var median = chartData["median"];
@@ -1067,6 +1186,10 @@ scout.pct = {
 		chart.update();
 	},
 
+	/*
+	 * Generate a chart for the given canvasId and fill it with fullData
+	 * Runs init, genChartData, and render
+	 */
 	load: function(canvasId, fullData) {
 		var chart = scout.pct.init(canvasId);
 		scout.pct.render(chart, scout.pct.genChartData(fullData));
@@ -1075,6 +1198,9 @@ scout.pct = {
 	}
 }
 
+/*
+ * Donut-shaped chart for glucose percent in range
+ */
 scout.bg = {
 	init: function(canvasId) {
 		var bgCtx = document.getElementById(canvasId).getContext("2d");
@@ -1090,14 +1216,19 @@ scout.bg = {
 			bgCount: 0,
 			highBg: data.length>0 ? data[0]['sgv'] : 0,
 			lowBg: data.length>0 ? data[0]['sgv'] : 0,
+			backfillCount: 0
 		};
 		for (var i=0; i<data.length; i++) {
 			var obj = data[i];
 			scout.util.updateInRange(dat, obj['sgv']);
 			dat.bgSum += obj['sgv'];
 			dat.bgCount++;
+			if (scout.util.isBackfilledSgv(obj)) dat.backfillCount++;
 		}
 		console.debug("bg chartD", dat);
+
+		dat.totalRangeMs = (data.length >= 1 ? data[0].date - data[data.length-1].date : 0);
+		dat.totalPossibleBgs = Math.ceil(dat.totalRangeMs / (5 * 60 * 1000));
 		return dat;
 	},
 
@@ -1126,6 +1257,9 @@ scout.bg = {
 	}
 };
 
+/*
+ * Chart for generic blood glucose data
+ */
 scout.sgv = {
 	currentLength: 12,
 
@@ -1156,12 +1290,22 @@ scout.sgv = {
 				sgvConf['options']['elements'] = {point: {radius: 0}};
 			}
 		}
+		if (scout.config.graph_gradient) {
+			var annotations = sgvConf['options']['annotation']['annotations'];
+			for (var i=0; i<annotations.length; i++) {
+				annotations[i]['backgroundColor'] = scout.util.graphGradient(annotations[i]['id'], sgvCtx)
+			}
+		}
 
 		// hack for deep copy of data fields.
 		sgvConf.data = JSON.parse(JSON.stringify(scout.chartConf.sgv.data));
 		return new Chart(sgvCtx, sgvConf);
 	},
 
+	/*
+	 * Bind the halfday/today/threeday/week zoom options' click handlers
+	 * Runs on DOM page load
+	 */
 	bindJump: function() {
 		function click(hours) {
 			return function() {
@@ -1178,10 +1322,16 @@ scout.sgv = {
 		document.querySelector("#sgv-jump-week").addEventListener('click', click(7*24));//scout.fetch.week
 	},
 
+	/*
+	 * Binds the primary SGV chart as the one in overview
+	 */
 	primaryCallback: function(data) {
 		scout.sgv.callback(scout.chart.sgv, data);
 	},
 
+	/*
+	 * Fills the primary SGV chart with all data in ds
+	 */
 	primaryDSCallback: function() {
 		scout.sgv.primaryCallback({
 			'sgv': scout.ds.getLatestHrs('sgv', scout.sgv.currentLength),
@@ -1190,12 +1340,18 @@ scout.sgv = {
 		});
 	},
 
+	/*
+	 * Generic callback for rendering chart with obtained data
+	 */
 	callback: function(chart, data) {
 		scout.sgv.sgvCallback(chart, data);
 		scout.sgv.trCallback(chart, data);
 		scout.sgv.mbgCallback(chart, data);
 	},
 
+	/*
+	 * Renders manual blood glucose entries on chart
+	 */
 	mbgCallback: function(chart, fullData) {
 		var data = fullData["mbg"];
 		if (!data) {
@@ -1227,6 +1383,9 @@ scout.sgv = {
 		chart.update();
 	},
 
+	/*
+	 * Renders sensor glucose values on chart
+	 */
 	sgvCallback: function(chart, fullData) {
 		var data = fullData["sgv"];
 		console.log("sgvCallback data", data);
@@ -1249,8 +1408,14 @@ scout.sgv = {
 				sgvObj: obj
 			});
 			sum += obj['sgv'];
-			if (chart.options.usePointBackgroundColor) {
-				dataset.pointBackgroundColor.push(scout.util.colorForSgv(obj['sgv']))
+			
+			if (chart.options.usePointBackgroundColor &&
+				scout.config.graph_highlight_backfill &&
+				scout.util.isBackfilledSgv(obj))
+			{
+				dataset.pointBackgroundColor.push(scout.util.colorForSgvBackfill(obj['sgv']));
+			} else if (chart.options.usePointBackgroundColor) {
+				dataset.pointBackgroundColor.push(scout.util.colorForSgv(obj['sgv']));
 			}
 		}
 		var avg = Math.round(sum/dataset.data.length);
@@ -1266,6 +1431,9 @@ scout.sgv = {
 		chart.update();
 	},
 
+	/*
+	 * Renders treatment values on chart
+	 */
 	trCallback: function(chart, fullData) {
 		console.debug("trCallback", fullData);
 		var data = fullData["tr"];
@@ -1284,12 +1452,21 @@ scout.sgv = {
 			if (pt['r']) {
 				console.debug("bolus", obj['created_at'], pt);
 				dataset.data.push(pt);
-			} else console.debug("skipped non-bolus", obj['created_at'], pt);
+			} else if (!!obj['notes']) {
+				// todo: pt['backgroundColor'] = 'yellow';
+				pt['r'] = 0;
+				dataset.data.push(pt);
+				console.debug("non-bolus note", obj['created_at'], pt);
+			} else {
+				console.debug("skipped non-bolus", obj['created_at'], pt);
+			}
 		}
 		chart.update();
 	},
 
-
+	/*
+	 * Inits data and bolusData
+	 */
 	load: function(canvasId, data, bolusData, extraConf) {
 		var chart = scout.sgv.init(canvasId, extraConf);
 		scout.sgv.callback(chart, data);
@@ -1327,11 +1504,11 @@ scout.ds = {
 			if (type == 'sgv' || type == 'mbg') {
 				var fl = cat.filter(function(e) { return e['date'] == data[i]['date']; });
 				if (fl.length == 0) {
-					cat.push(scout.ds._fixSgvDirection(data[i]));
+					cat.push(scout.ds._fixSgvDirectionWrapper(data[i]));
 					adds++;
 				} else if (fl.length == 1 && fl[0]['converted']) {
 					scout.ds[type] = scout.ds[type].filter(function(e) { return e['date'] != fl[0]['date']; });
-					scout.ds[type].push(scout.ds._fixSgvDirection(data[i]));
+					scout.ds[type].push(scout.ds._fixSgvDirectionWrapper(data[i]));
 					console.debug("ds.addReplaceConverted["+fl[0]['date']+"]", fl, data[i]);
 					adds++;
 				}
@@ -1371,6 +1548,17 @@ scout.ds = {
 			return sgv;
 		}
 		return sgv;
+	},
+
+	/*
+	 * Only run fixSgvDirection when enabled
+	 */
+	_fixSgvDirectionWrapper: function(sgv) {
+		if (scout.config.fix_sgv_direction) {
+			return scout.ds._fixSgvDirection(sgv);
+		} else {
+			return sgv;
+		}
 	},
 
 	/*
@@ -1438,7 +1626,6 @@ scout.ds = {
 	 * Convert multiple sgv's
 	 */
 	_convertSgvs: function(sgvs) {
-		console.debug("convertSgvs: ", sgvs);
 		var upd = [];
 		for (var i=0; i<sgvs.length; i++) {
 			var prv;
@@ -1450,7 +1637,7 @@ scout.ds = {
 			}
 			upd[i] = scout.ds._convertSgv(sgvs[i], prv);
 		}
-		console.debug("convertSgvs done: ", upd);
+		console.debug("convertSgvs done: ", upd, "from:", sgvs);
 		return upd;
 	},
 
@@ -1458,12 +1645,11 @@ scout.ds = {
 	 * Convert multiple mbg's
 	 */
 	_convertMbgs: function(mbgs) {
-		console.debug("convertMbgs:", mbgs);
 		var upd = [];
 		for (var i=0; i<mbgs.length; i++) {
 			upd[i] = scout.ds._convertMbg(mbgs[i]);
 		}
-		console.debug("convertMbgs done:", upd);
+		console.debug("convertMbgs done:", upd, "from:", mbgs);
 		return upd;
 	},
 
@@ -1473,7 +1659,6 @@ scout.ds = {
 	 * because it secretly adds a mgdl value of the current SGV.
 	 */
 	_convertMbgsFromTreatments: function(trs, requireEventType) {
-		console.debug("convertMbgsFromTreatments:", trs);
 		var upd = [];
 		for (var i=0; i<trs.length; i++) {
 			var eventTypeCheck = requireEventType ? (trs[i]['eventType'] == 'BG Check') : true;
@@ -1481,7 +1666,7 @@ scout.ds = {
 				upd.push(scout.ds._convertMbg(trs[i]));
 			}
 		}
-		console.debug("convertMbgsFromTreatments done:", upd);
+		console.debug("convertMbgsFromTreatments done:", upd, "from:", trs);
 		return upd;
 	},
 
@@ -1541,17 +1726,28 @@ scout.ds = {
 		}
 	},
 
+	/*
+	 * Filter shortcut
+	 */
 	filter: function(type, filter) {
 		return scout.ds[type].filter(filter);
 	},
 
+	/*
+	 * Sort data of type
+	 * Run when new data is added
+	 */
 	_sort: function(type) {
 		scout.ds[type].sort(function(a, b) {
 			return a.date-b.date;
 		});
-		console.debug("ds.sort["+type+"]");
 	},
 
+	/*
+	 * Get the date column used in the Nightscout provided data dump
+	 * for the given type. Sensor values are stored in nightscout's
+	 * mongo as 'date' while almost everything else uses 'created_at'
+	 */
 	_dateCol: function(type) {
 		if (type == 'sgv') return 'date';
 		if (type == 'tr') return 'created_at';
@@ -1636,13 +1832,16 @@ scout.current = {
 
 		curSgv.innerHTML = sgvText;
 		curSgv.style.color = scout.util.colorForSgv(cur['sgv']);
+
+		var delayedSec =  moment.duration(moment().diff(cur['date'])).asSeconds();
+		console.debug('delayedSec', delayedSec);
 		curMins.innerHTML = scout.util.embedTimeago(cur['date']);
 		scout.util.updateTimeago();
 		document.querySelector("#current_direction").innerHTML = direction;
 		document.querySelector("#current_delta").innerHTML = delta;
-//		if (noise.length > 2) {
-//			noise += "<br />";
-//		}
+		if (noise.length > 2) {
+			noise += "<br />";
+		}
 		document.querySelector("#current_noise").innerHTML = noise;
 
 		var title = cur['sgv']+''+direction+' '+delta+' '+noise+' - scout';
@@ -1731,7 +1930,7 @@ scout.current = {
 		var delta = scout.util.fmtDelta(cur['delta']);
 		var arrow = scout.util.directionToThickArrow(cur['direction']);
 		var noise = scout.util.noise(cur['noise']);
-//		if (noise.length > 1) arrow = noise.substring(0, 1);
+		if (noise.length > 1) arrow = noise.substring(0, 1);
 		var canvas = document.getElementById("favicon_canvas");
 		
 		var bs = canvas.width;
@@ -1806,7 +2005,10 @@ scout.current = {
 			cur['sgv'] < scout.config.sgv.target_min || 
 			cur['sgv'] >= scout.config.sgv.target_max ||
 			Math.abs(cur['delta']) >= scout.config.sgv.spike_delta
-		) && (cur["_id"] != scout.current.nflast["_id"]);
+		) && ( // prevents notifying large delta from missing data
+		       (scout.config.notify_for_converted_deltas ? true : !cur['converted'])
+		) && ( // No repeats
+			cur["_id"] != scout.current.nflast["_id"]);
 	},
 
 	shouldNotifyText: function(cur) {
@@ -2043,6 +2245,9 @@ scout.fetch = function(args, cb) {
 	});
 }
 
+/*
+ * Shortcuts for various ranges for fetching
+ */
 scout.fetch.gte = function(fmt, cb) {
 	return scout.fetch({date: {"gte": fmt}, count: 99999}, cb);
 }
@@ -2080,6 +2285,9 @@ scout.fetch.hours = function(hours, cb) {
  * Module for status info for the current device.
  */
 scout.device = {
+	/*
+	 * Get count number of device statuses
+	 */
 	fetchStatus: function(count, cb) {
 		superagent.get(scout.config.urls.apiRoot + scout.config.urls.deviceStatus + "?count=" + parseInt(count) + "&ts=" + (+new Date()), function(resp) {
 			var data = JSON.parse(resp.text);
@@ -2088,6 +2296,9 @@ scout.device = {
 		});
 	},
 
+	/*
+	 * Get the latest Sensor Start treatment
+	 */
 	fetchSensorStart: function(cb) {
 		scout.trfetch({
 			eventType: "Sensor+Start",
@@ -2098,6 +2309,9 @@ scout.device = {
 		}, cb);
 	},
 
+	/*
+	 * Render the status of the uploader in the overview
+	 */
 	renderStatus: function(data) {
 		var latest = data[0];
 		console.log("latest devicestatus:", latest);
@@ -2105,6 +2319,9 @@ scout.device = {
 		document.querySelector("#device_name").innerHTML = latest["device"];
 	},
 
+	/*
+	 * Render the status of the cgm in the overview
+	 */
 	renderSensor: function(trData) {
 		var latest = trData[0];
 		var created = latest["created_at"];
@@ -2115,6 +2332,9 @@ scout.device = {
 		scout.util.updateTimeago();
 	},
 
+	/*
+	 * Update device and sensor status
+	 */
 	update: function() {
 		scout.device.fetchStatus(1, scout.device.renderStatus);
 
@@ -2143,6 +2363,9 @@ scout.trfetch = function(args, cb) {
 	});
 };
 
+/*
+ * Shortcuts for fetching bolus data
+ */
 scout.trfetch.bolus = function(args, cb) {
 	args["eventType"] = "Meal Bolus";
 	return scout.trfetch(args, cb);
@@ -2289,6 +2512,9 @@ scout.bat = {
 		return new Chart(batCtx, batConf);
 	},
 
+	/*
+	 * Add battery data to chart dataset
+	 */
 	callback: function(chart, data) {
 		var dataset = chart.data.datasets[0];
 		dataset.backgroundColor = [];
@@ -2323,6 +2549,9 @@ scout.uploaderBat = {
 		scout.uploaderBat.refreshGraph();
 	},
 
+	/*
+	 * Get the number of uploader readings to show in the chart
+	 */
 	getReadingsCount: function() {
 		var readings = document.getElementById("uploader_bat_readings");
 		if (!readings) {
@@ -2331,12 +2560,18 @@ scout.uploaderBat = {
 		return parseInt(readings.value);
 	},
 
+	/*
+	 * Update the current status of the uploader on the page
+	 */
 	currentStatus: function(data) {
 		var cont = document.getElementById("uploader_bat_status");
 		var data = scout.uploaderBat.currentStatusData(data);
 		cont.innerHTML = scout.tpl.renderHTML("uploader_bat_status_tpl", data);
 	},
 
+	/*
+	 * Format the template data for status of the uploader
+	 */
 	currentStatusData: function(data) {
 		var latest = data[0];
 		var created = moment(latest['created_at']);
@@ -2347,18 +2582,27 @@ scout.uploaderBat = {
 		};
 	},
 
+	/*
+	 * Update the battery chart
+	 */
 	updateCanvas: function(data) {
 		var cont = document.getElementById("uploader_bat_canvas_container");
 		cont.innerHTML = scout.tpl.renderHTML("uploader_bat_canvas_tpl", {});
 		scout.bat.load("uploaderBatCanvas", data);
 	},
 
+	/*
+	 * Get the most recent device status
+	 */
 	refreshCurrentStatus: function() {
 		scout.device.fetchStatus(1, function(data) {
 			scout.uploaderBat.currentStatus(data);
 		});
 	},
 
+	/*
+	 * Grab new data for the graph using currently requested # of entries
+	 */
 	refreshGraph: function() {
 		scout.spinner.start('uploaderBat');
 		scout.device.fetchStatus(scout.uploaderBat.getReadingsCount(), function(data) {
@@ -2375,6 +2619,12 @@ scout.uploaderBat = {
  */
 scout.ws = {
 	socket: null,
+	silentDataUpdates: 0,
+	/*
+	 * Initialize a ws connection 'silently', meaning don't inform the rest of the
+	 * application that we're using websockets and still manually poll.
+	 * This is practically useless.
+	 */
 	silentInit: function() {
 		scout.ws.socket = io(scout.config.urls.domainRoot, {
 			path: scout.config.urls.socketio_path
@@ -2396,11 +2646,15 @@ scout.ws = {
 
 		socket.on('dataUpdate', function(data) {
 			console.log('SilentDataUpdate', data);
-			scout.ws.foo++;
+			scout.ws.silentDataUpdates++;
 			//scout.ds.deltaAdd(data);
 		});
 	},
-	foo: 0,
+
+	/*
+	 * Initialize and connect to the ws socketio path and register the callback
+	 * for dataUpdate socket events
+	 */
 	init: function() {
 		scout.ws.socket = io(scout.config.urls.domainRoot, {
 			path: scout.config.urls.socketio_path
@@ -2464,6 +2718,7 @@ scout.init = {
 		scr.onload = scout.ws.init;
 		document.body.appendChild(scr);
 	},
+
 	silentWebsocket: function() {
 		var scr = document.createElement('script');
 		scr.type = 'text/javascript';
@@ -2478,6 +2733,9 @@ scout.init = {
  */
 Chart.defaults.global.plugins.datalabels.display = false;
 Chart.defaults.global.animation.duration = 250;
+/*
+ * Extension for center text inside donut charts (type sgv)
+ */
 Chart.pluginService.register({
 	afterUpdate: function (chart) {
 		if (chart.config.options.elements.center) {
@@ -2543,4 +2801,17 @@ window.onload = function() {
 	scout.sgv.primaryInit();
 	scout.init.fetch();
 	scout.util.updateTimeago();
+	if (window.location.search.indexOf('?dark') != -1) {
+		var color = '#303030';
+		var arg = window.location.search.split('?dark=');
+		if (arg.length > 1) color = arg[1];
+		var style = document.createElement('style');
+		style.innerHTML = '' +
+		'body, *, .mdl-card, .mdl-layout__tab-bar {' +
+		'	background: ' + color + ';' +
+		'	color: white;' +
+		'}' +
+		'body { min-height: inherit; }';
+		document.body.appendChild(style);
+	}
 };
