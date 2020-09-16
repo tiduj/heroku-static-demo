@@ -18,10 +18,10 @@ var scout = {
 		},
 		sgv: {
 			target_min: 80,
-			target_max: 200,
+			target_max: 180,
 			spike_delta: 12,
 			graph_min: 40,
-			graph_max: 240
+			graph_max: 350
 		},
 		mbg: {
 			radius: 5
@@ -30,7 +30,7 @@ var scout = {
 		missed_minutes: 10,
 		pct_split_mins: 15,
 		modifyTitle: false,
-		timeFormat: 'MM/DD/YYYY HH:mm',
+		timeFormat: 'DD/MM/YYYY HH:mm',
 		favicon_alternate_ms: 5000,
 		reload_ms: 30*1000,
 		notification_ms: 5000,
@@ -42,7 +42,7 @@ var scout = {
 		fix_sgv_direction: true,
 		notify_for_converted_deltas: false,
 		graph_gradient: false,
-		tooltip_device_strip: 'xDrip-DexcomG5',
+		tooltip_device_strip: 'xDrip-Libre',
 		graph_highlight_backfill: true
 	}
 };
